@@ -1,0 +1,767 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>KV Cache Contiguous VRAM Allocation</title>
+  <meta name="description" content="An SVG animation showing repeated session allocation, KV cache growth, release, and address-range reuse inside a fixed 12 GiB VRAM pool.">
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #06111f;
+      --bg-deep: #030914;
+      --surface: rgba(9, 28, 49, .78);
+      --surface-strong: #0b2038;
+      --line: rgba(116, 181, 255, .18);
+      --line-strong: rgba(116, 181, 255, .34);
+      --text: #e8f3ff;
+      --muted: #8eabc8;
+      --dim: #5e7b98;
+      --blue-100: #d9efff;
+      --blue-200: #a9d8ff;
+      --blue-300: #74bdff;
+      --blue-400: #369fff;
+      --blue-500: #167ee8;
+      --blue-600: #0e5fab;
+      --blue-700: #164a78;
+      --blue-800: #123553;
+      --blue-900: #0c243a;
+      --radius: 22px;
+      --shadow: 0 24px 70px rgba(0, 0, 0, .32);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    html { min-width: 320px; background: var(--bg-deep); }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 22% 2%, rgba(27, 126, 223, .17), transparent 32rem),
+        radial-gradient(circle at 85% 55%, rgba(23, 94, 160, .12), transparent 34rem),
+        linear-gradient(145deg, var(--bg) 0%, var(--bg-deep) 100%);
+    }
+
+    button, input { font: inherit; }
+
+    button:focus-visible, input:focus-visible {
+      outline: 3px solid rgba(116, 189, 255, .75);
+      outline-offset: 3px;
+    }
+
+    .shell {
+      width: min(1180px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 44px 0 54px;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      margin-bottom: 16px;
+      color: var(--blue-300);
+      font-size: .76rem;
+      font-weight: 750;
+      letter-spacing: .13em;
+      text-transform: uppercase;
+    }
+
+    .eyebrow::before {
+      content: "";
+      width: 26px;
+      height: 1px;
+      background: var(--blue-400);
+      box-shadow: 0 0 12px var(--blue-400);
+    }
+
+    h1 {
+      max-width: 820px;
+      margin: 0;
+      font-size: clamp(2rem, 5vw, 4.4rem);
+      line-height: .98;
+      letter-spacing: -.055em;
+      font-weight: 760;
+    }
+
+    .lead {
+      max-width: 720px;
+      margin: 22px 0 34px;
+      color: var(--muted);
+      font-size: clamp(.98rem, 1.8vw, 1.14rem);
+      line-height: 1.72;
+    }
+
+    .panel {
+      position: relative;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: linear-gradient(145deg, rgba(12, 34, 59, .88), rgba(5, 19, 34, .84));
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(18px);
+    }
+
+    .panel::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      background: linear-gradient(115deg, rgba(255,255,255,.035), transparent 28%);
+    }
+
+    .panel-head {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      justify-content: space-between;
+      gap: 24px;
+      align-items: flex-start;
+      padding: 24px 26px 18px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .phase-copy { min-width: 0; }
+
+    .phase-kicker {
+      display: block;
+      margin-bottom: 6px;
+      color: var(--dim);
+      font-size: .7rem;
+      font-weight: 760;
+      letter-spacing: .11em;
+      text-transform: uppercase;
+    }
+
+    .phase-title {
+      margin: 0;
+      font-size: clamp(1.05rem, 2.4vw, 1.4rem);
+      line-height: 1.28;
+      letter-spacing: -.02em;
+    }
+
+    .phase-desc {
+      margin: 8px 0 0;
+      color: var(--muted);
+      font-size: .88rem;
+      line-height: 1.5;
+    }
+
+    .clock {
+      flex: 0 0 auto;
+      min-width: 78px;
+      text-align: right;
+    }
+
+    .clock strong {
+      display: block;
+      color: var(--blue-200);
+      font-size: 1.22rem;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .clock span {
+      color: var(--dim);
+      font-size: .7rem;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+
+    .viz-wrap {
+      position: relative;
+      z-index: 1;
+      padding: 22px 22px 8px;
+    }
+
+    #memory-svg {
+      display: block;
+      width: 100%;
+      height: auto;
+      overflow: visible;
+    }
+
+    .svg-label {
+      font-family: inherit;
+      fill: var(--muted);
+      font-size: 13px;
+    }
+
+    .svg-label.strong {
+      fill: var(--text);
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    .svg-label.tiny { font-size: 11px; }
+    .svg-label.accent { fill: var(--blue-200); }
+
+    .memory-outline {
+      fill: #071725;
+      stroke: rgba(116, 189, 255, .5);
+      stroke-width: 1.5;
+    }
+
+    .reserved-fill { fill: var(--blue-800); }
+    .used-fill { fill: url(#usedGradient); }
+    .session-reserved {
+      fill: var(--blue-700);
+      stroke: rgba(116, 189, 255, .36);
+      stroke-width: 1;
+    }
+    .session-line { stroke: rgba(218, 239, 255, .42); stroke-width: 1; }
+    .unused-fill { fill: var(--blue-900); }
+
+    .capacity-tick { stroke: rgba(116, 181, 255, .2); stroke-width: 1; }
+
+    .capacity-text {
+      fill: var(--dim);
+      font-family: inherit;
+      font-size: 11px;
+    }
+
+    .legend-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px 20px;
+      padding: 4px 26px 22px;
+      color: var(--muted);
+      font-size: .78rem;
+    }
+
+    .legend-item { display: inline-flex; align-items: center; gap: 8px; }
+
+    .swatch {
+      width: 17px;
+      height: 10px;
+      border: 1px solid rgba(169, 216, 255, .28);
+      border-radius: 3px;
+      background: #071725;
+    }
+
+    .swatch.used { background: var(--blue-400); }
+    .swatch.reserved { background: var(--blue-700); }
+
+    .control-bar {
+      position: relative;
+      z-index: 1;
+      display: grid;
+      grid-template-columns: auto minmax(180px, 1fr) auto;
+      gap: 18px;
+      align-items: center;
+      padding: 18px 24px 22px;
+      border-top: 1px solid var(--line);
+      background: rgba(3, 14, 26, .44);
+    }
+
+    .buttons { display: flex; gap: 9px; }
+
+    .control-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 42px;
+      height: 38px;
+      border: 1px solid var(--line-strong);
+      border-radius: 10px;
+      color: var(--text);
+      background: rgba(15, 52, 85, .72);
+      cursor: pointer;
+      transition: transform .18s ease, border-color .18s ease, background .18s ease;
+    }
+
+    .control-btn.primary { min-width: 88px; background: var(--blue-600); border-color: var(--blue-400); }
+    .control-btn:hover { transform: translateY(-1px); border-color: var(--blue-300); background: rgba(22, 79, 127, .9); }
+    .control-btn svg { width: 16px; height: 16px; margin-right: 7px; }
+    .icon-only svg { margin: 0; }
+
+    .timeline-block { min-width: 0; }
+
+    .timeline-labels {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 8px;
+      color: var(--dim);
+      font-size: .68rem;
+      font-variant-numeric: tabular-nums;
+    }
+
+    input[type="range"] {
+      display: block;
+      width: 100%;
+      height: 5px;
+      margin: 0;
+      appearance: none;
+      border-radius: 999px;
+      background: linear-gradient(90deg, var(--blue-400) 0 var(--timeline-fill, 0%), var(--blue-900) var(--timeline-fill, 0%) 100%);
+      cursor: pointer;
+    }
+
+    input[type="range"]::-webkit-slider-thumb {
+      width: 16px;
+      height: 16px;
+      appearance: none;
+      border: 3px solid var(--blue-100);
+      border-radius: 50%;
+      background: var(--blue-500);
+      box-shadow: 0 0 0 4px rgba(54,159,255,.15);
+    }
+
+    input[type="range"]::-moz-range-thumb {
+      width: 12px;
+      height: 12px;
+      border: 3px solid var(--blue-100);
+      border-radius: 50%;
+      background: var(--blue-500);
+      box-shadow: 0 0 0 4px rgba(54,159,255,.15);
+    }
+
+    .speed {
+      color: var(--blue-200);
+      font-size: .76rem;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+      margin-top: 16px;
+    }
+
+    .stat {
+      min-width: 0;
+      padding: 17px 18px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: rgba(8, 28, 49, .55);
+    }
+
+    .stat-label {
+      color: var(--dim);
+      font-size: .7rem;
+      font-weight: 700;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
+
+    .stat-value {
+      display: block;
+      margin-top: 7px;
+      color: var(--blue-100);
+      font-size: clamp(1.15rem, 2.6vw, 1.72rem);
+      font-weight: 760;
+      letter-spacing: -.03em;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .stat-note {
+      display: block;
+      min-height: 1.3em;
+      margin-top: 4px;
+      overflow: hidden;
+      color: var(--muted);
+      font-size: .72rem;
+      line-height: 1.3;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .footnote {
+      display: flex;
+      justify-content: space-between;
+      gap: 18px;
+      margin-top: 16px;
+      padding: 0 3px;
+      color: var(--dim);
+      font-size: .72rem;
+      line-height: 1.5;
+    }
+
+    .live-status {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip: rect(0 0 0 0);
+      white-space: nowrap;
+    }
+
+    @media (max-width: 760px) {
+      .shell { width: min(100% - 20px, 1180px); padding-top: 28px; }
+      .panel-head { padding: 20px; }
+      .phase-desc { max-width: 42ch; }
+      .viz-wrap { padding: 14px 10px 0; overflow-x: auto; }
+      #memory-svg { min-width: 680px; }
+      .legend-row { padding: 8px 20px 18px; }
+      .control-bar { grid-template-columns: 1fr auto; gap: 14px; padding: 16px 18px 20px; }
+      .buttons { grid-column: 1 / -1; }
+      .timeline-block { grid-column: 1; }
+      .speed { grid-column: 2; }
+      .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .footnote { flex-direction: column; gap: 4px; }
+    }
+
+    @media (max-width: 450px) {
+      .panel-head { flex-direction: column; gap: 12px; }
+      .clock { text-align: left; }
+      .stats { grid-template-columns: 1fr 1fr; gap: 9px; }
+      .stat { padding: 14px; }
+      .lead { margin-bottom: 24px; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <div class="eyebrow">GPU MEMORY · SVG EXPLAINER</div>
+    <h1>KV Cache<br>Contiguous VRAM Allocation</h1>
+    <p class="lead">The system reserves a fixed 12 GiB VRAM pool for KV cache. Each session instantly receives a contiguous range sized for its maximum context; usage grows with incoming tokens, and released ranges can be reused by later sessions.</p>
+
+    <section class="panel" aria-labelledby="phase-title">
+      <div class="panel-head">
+        <div class="phase-copy">
+          <span class="phase-kicker">CURRENT STAGE <span id="phase-index">01 / 09</span></span>
+          <h2 class="phase-title" id="phase-title">First allocation round begins</h2>
+          <p class="phase-desc" id="phase-desc">Sessions A and B receive their complete contiguous ranges instantly on arrival.</p>
+        </div>
+        <div class="clock" aria-label="Simulation time">
+          <strong id="clock-value">00:00</strong>
+          <span>decode time</span>
+        </div>
+      </div>
+
+      <div class="viz-wrap">
+        <svg id="memory-svg" viewBox="0 0 1100 365" role="img" aria-labelledby="svg-title svg-desc">
+          <title id="svg-title">KV cache contiguous VRAM allocation lifecycle</title>
+          <desc id="svg-desc">Inside a fixed 12 GiB KV cache pool, multiple rounds of sessions receive contiguous ranges, grow their usage, release memory, and reuse previously released address ranges.</desc>
+          <defs>
+            <linearGradient id="usedGradient" x1="0" x2="1">
+              <stop offset="0" stop-color="#167ee8" />
+              <stop offset="1" stop-color="#52adff" />
+            </linearGradient>
+            <linearGradient id="glowGradient" x1="0" x2="1">
+              <stop offset="0" stop-color="#74bdff" stop-opacity="0" />
+              <stop offset=".7" stop-color="#a9d8ff" stop-opacity=".35" />
+              <stop offset="1" stop-color="#d9efff" stop-opacity=".85" />
+            </linearGradient>
+            <filter id="softGlow" x="-50%" y="-50%" width="200%" height="200%">
+              <feGaussianBlur stdDeviation="6" />
+            </filter>
+            <clipPath id="memoryClip">
+              <rect x="70" y="118" width="960" height="112" rx="12" />
+            </clipPath>
+          </defs>
+
+          <text x="70" y="52" class="svg-label strong">VRAM address space · schematic</text>
+          <text x="1030" y="52" text-anchor="end" class="svg-label accent">12 GiB · FIXED KV CACHE POOL</text>
+          <path d="M70 78 H1030" class="capacity-tick" />
+
+          <g id="ticks" aria-hidden="true"></g>
+
+          <rect x="70" y="118" width="960" height="112" rx="12" class="memory-outline" />
+          <g clip-path="url(#memoryClip)">
+            <rect id="reserved" x="70" y="118" width="0" height="112" class="reserved-fill" />
+            <rect id="used" x="70" y="118" width="0" height="112" class="used-fill" />
+            <rect id="used-glow" x="70" y="118" width="0" height="112" fill="url(#glowGradient)" opacity="0" filter="url(#softGlow)" />
+            <g id="session-segments"></g>
+          </g>
+
+          <g id="session-labels"></g>
+          <text x="70" y="335" class="svg-label tiny">0x7F20_0000</text>
+          <text x="1030" y="335" text-anchor="end" class="svg-label tiny">0x7FDF_FFFF</text>
+        </svg>
+      </div>
+
+      <div class="legend-row" aria-label="Legend">
+        <span class="legend-item"><i class="swatch used"></i>Used</span>
+        <span class="legend-item"><i class="swatch reserved"></i>Reserved · unused</span>
+        <span class="legend-item"><i class="swatch"></i>Unallocated</span>
+      </div>
+
+      <div class="control-bar">
+        <div class="buttons">
+          <button class="control-btn primary" id="play-button" type="button" aria-pressed="true">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path id="play-icon" fill="currentColor" d="M6 4.5h3v11H6zm5 0h3v11h-3z" /></svg>
+            <span id="play-text">Pause</span>
+          </button>
+          <button class="control-btn icon-only" id="reset-button" type="button" aria-label="Replay from the beginning">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path fill="currentColor" d="M10 3a7 7 0 1 1-6.25 3.84l1.78.9A5 5 0 1 0 10 5H8.2l2.7 2.7-1.4 1.4L4.4 4l5.1-5.1 1.4 1.4L8.2 3H10Z" /></svg>
+          </button>
+        </div>
+        <div class="timeline-block">
+          <div class="timeline-labels"><span>Round 1 allocate</span><span>Usage growth</span><span>Round 1 release</span><span>Round 2 reuse</span><span>Release again</span><span>Round 3 reuse</span></div>
+          <label for="timeline" class="live-status">Animation timeline</label>
+          <input id="timeline" type="range" min="0" max="1000" value="0" step="1">
+        </div>
+        <span class="speed">1× · LOOP</span>
+      </div>
+      <div class="live-status" id="live-status" aria-live="polite"></div>
+    </section>
+
+    <section class="stats" aria-label="VRAM status">
+      <div class="stat">
+        <span class="stat-label">Fixed KV cache pool</span>
+        <strong class="stat-value" id="stat-allocated">12.0 GiB</strong>
+        <span class="stat-note">Total capacity stays constant</span>
+      </div>
+      <div class="stat">
+        <span class="stat-label">Used / fixed pool</span>
+        <strong class="stat-value" id="stat-used">0.0 / 12.0 GiB</strong>
+        <span class="stat-note" id="stat-used-note">Waiting for tokens</span>
+      </div>
+    </section>
+
+    <div class="footnote">
+      <span>Illustrative scale: 1 GiB = 80 px. Values explain the memory layout.</span>
+      <span>Allocations and releases are discrete; KV usage grows continuously.</span>
+    </div>
+  </main>
+
+  <script>
+    (() => {
+      const svgNS = 'http://www.w3.org/2000/svg';
+      const timeline = document.getElementById('timeline');
+      const playButton = document.getElementById('play-button');
+      const resetButton = document.getElementById('reset-button');
+      const playText = document.getElementById('play-text');
+      const playIcon = document.getElementById('play-icon');
+      const reserved = document.getElementById('reserved');
+      const used = document.getElementById('used');
+      const usedGlow = document.getElementById('used-glow');
+      const segmentLayer = document.getElementById('session-segments');
+      const labelLayer = document.getElementById('session-labels');
+
+      const phaseIndex = document.getElementById('phase-index');
+      const phaseTitle = document.getElementById('phase-title');
+      const phaseDesc = document.getElementById('phase-desc');
+      const clockValue = document.getElementById('clock-value');
+      const liveStatus = document.getElementById('live-status');
+
+      const statAllocated = document.getElementById('stat-allocated');
+      const statUsed = document.getElementById('stat-used');
+      const statUsedNote = document.getElementById('stat-used-note');
+
+      const memoryX = 70;
+      const memoryY = 118;
+      const memoryW = 960;
+      const memoryH = 112;
+      const fixedPoolGiB = 12;
+      const gibToPx = memoryW / fixedPoolGiB;
+      const duration = 24000;
+      const phases = [
+        { at: 0, title: 'First allocation round begins', desc: 'Sessions A and B receive their complete contiguous ranges instantly on arrival.' },
+        { at: .17, title: 'C, D, and E complete round one', desc: 'Each new range begins after the previous allocation and is sized for that session’s maximum context.' },
+        { at: .32, title: 'Round-one usage keeps growing', desc: 'Each session grows only inside its reserved range; other session addresses remain fixed.' },
+        { at: .45, title: 'Session B ends and releases instantly', desc: 'B’s entire range becomes unallocated at once while the fixed pool remains 12 GiB.' },
+        { at: .50, title: 'Session F reuses B’s range', desc: 'F instantly occupies part of the released range; the remainder stays unallocated.' },
+        { at: .60, title: 'D releases, then G reuses the range', desc: 'D releases instantly; G begins a second allocation-and-growth cycle in the same address range.' },
+        { at: .68, title: 'A releases; H reuses the opening range', desc: 'After the starting range is reclaimed, H instantly receives a shorter contiguous allocation.' },
+        { at: .78, title: 'C releases; I continues the reuse cycle', desc: 'C releases instantly, then Session I is allocated inside the same address range.' },
+        { at: .88, title: 'E releases; J completes round three', desc: 'The final range is released and allocated again, completing another pool lifecycle.' }
+      ];
+
+      const sessions = [
+        { name: 'Session A', start: 0, capacity: 2.8, targetUsed: 2.2, allocAt: 0, useStart: .02, useEnd: .32, releaseAt: .68 },
+        { name: 'Session B', start: 2.8, capacity: 2.1, targetUsed: 1.5, allocAt: .08, useStart: .10, useEnd: .30, releaseAt: .45 },
+        { name: 'Session C', start: 4.9, capacity: 2.6, targetUsed: 1.9, allocAt: .17, useStart: .19, useEnd: .50, releaseAt: .78 },
+        { name: 'Session D', start: 7.5, capacity: 2.4, targetUsed: 1.7, allocAt: .24, useStart: .26, useEnd: .52, releaseAt: .60 },
+        { name: 'Session E', start: 9.9, capacity: 2.1, targetUsed: 1.4, allocAt: .31, useStart: .33, useEnd: .70, releaseAt: .88 },
+        { name: 'Session F', start: 2.8, capacity: 1.7, targetUsed: 1.2, allocAt: .50, useStart: .52, useEnd: .74, releaseAt: .84 },
+        { name: 'Session G', start: 7.5, capacity: 2.0, targetUsed: 1.5, allocAt: .64, useStart: .66, useEnd: .90, releaseAt: null },
+        { name: 'Session H', start: 0, capacity: 2.4, targetUsed: 1.8, allocAt: .72, useStart: .74, useEnd: .96, releaseAt: null },
+        { name: 'Session I', start: 4.9, capacity: 2.2, targetUsed: 1.6, allocAt: .82, useStart: .84, useEnd: .98, releaseAt: null },
+        { name: 'Session J', start: 9.9, capacity: 1.8, targetUsed: 1.0, allocAt: .92, useStart: .93, useEnd: 1, releaseAt: null }
+      ];
+
+      const ticks = document.getElementById('ticks');
+      for (let i = 0; i <= 12; i += 2) {
+        const x = memoryX + i * gibToPx;
+        const line = document.createElementNS(svgNS, 'line');
+        line.setAttribute('x1', x);
+        line.setAttribute('x2', x);
+        line.setAttribute('y1', 78);
+        line.setAttribute('y2', 91);
+        line.setAttribute('class', 'capacity-tick');
+        ticks.appendChild(line);
+
+        const text = document.createElementNS(svgNS, 'text');
+        text.setAttribute('x', x);
+        text.setAttribute('y', 108);
+        text.setAttribute('text-anchor', i === 0 ? 'start' : i === 12 ? 'end' : 'middle');
+        text.setAttribute('class', 'capacity-text');
+        text.textContent = `${i} GiB`;
+        ticks.appendChild(text);
+      }
+
+      function clamp(value, min = 0, max = 1) { return Math.min(max, Math.max(min, value)); }
+      function ease(t) { t = clamp(t); return 1 - Math.pow(1 - t, 3); }
+      function phaseProgress(p, start, end) { return clamp((p - start) / (end - start)); }
+
+      function svgRect(layer, x, y, width, height, className, rx = 0) {
+        const rect = document.createElementNS(svgNS, 'rect');
+        rect.setAttribute('x', x);
+        rect.setAttribute('y', y);
+        rect.setAttribute('width', Math.max(0, width));
+        rect.setAttribute('height', height);
+        rect.setAttribute('class', className);
+        if (rx) rect.setAttribute('rx', rx);
+        layer.appendChild(rect);
+        return rect;
+      }
+
+      function svgText(layer, x, y, textValue, className, anchor = 'middle') {
+        const text = document.createElementNS(svgNS, 'text');
+        text.setAttribute('x', x);
+        text.setAttribute('y', y);
+        text.setAttribute('text-anchor', anchor);
+        text.setAttribute('class', className);
+        text.textContent = textValue;
+        layer.appendChild(text);
+        return text;
+      }
+
+      let playing = true;
+      let progress = 0;
+      let lastTime = performance.now();
+      let previousPhase = -1;
+      const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+      function setPlaying(next) {
+        playing = next;
+        playButton.setAttribute('aria-pressed', String(playing));
+        playText.textContent = playing ? 'Pause' : 'Play';
+        playIcon.setAttribute('d', playing
+          ? 'M6 4.5h3v11H6zm5 0h3v11h-3z'
+          : 'M6.5 4.2v11.6L15 10z');
+      }
+
+      function render(p, announce = false) {
+        progress = clamp(p);
+        let effectiveUsed = 0;
+        let newestUsedEnd = memoryX;
+
+        reserved.setAttribute('width', 0);
+        used.setAttribute('width', 0);
+        usedGlow.setAttribute('opacity', 0);
+
+        segmentLayer.replaceChildren();
+        labelLayer.replaceChildren();
+
+        sessions.forEach((session, index) => {
+          const allocationProgress = progress >= session.allocAt ? 1 : 0;
+          const allocatedCapacity = session.capacity * allocationProgress;
+          const usedCapacity = session.targetUsed * ease(phaseProgress(progress, session.useStart, session.useEnd));
+          const isReleasedSession = session.releaseAt !== null && progress >= session.releaseAt;
+          if (allocatedCapacity <= .01 || isReleasedSession) return;
+          const startX = memoryX + session.start * gibToPx;
+          const allocationWidth = allocatedCapacity * gibToPx;
+          const fullAllocationWidth = session.capacity * gibToPx;
+          const usedWidth = Math.min(usedCapacity, allocatedCapacity) * gibToPx;
+
+          effectiveUsed += Math.min(usedCapacity, allocatedCapacity);
+
+          svgRect(segmentLayer, startX, memoryY, allocationWidth, memoryH, 'session-reserved');
+          if (usedWidth > 0) {
+            svgRect(segmentLayer, startX, memoryY, usedWidth, memoryH, 'used-fill');
+            newestUsedEnd = Math.max(newestUsedEnd, startX + usedWidth);
+          }
+
+          if (index > 0 && allocationProgress > 0) {
+            const separator = document.createElementNS(svgNS, 'line');
+            separator.setAttribute('x1', startX);
+            separator.setAttribute('x2', startX);
+            separator.setAttribute('y1', memoryY + 8);
+            separator.setAttribute('y2', memoryY + memoryH - 8);
+            separator.setAttribute('class', 'session-line');
+            segmentLayer.appendChild(separator);
+          }
+
+          if (allocationWidth > 88) {
+            const labelCenter = startX + Math.min(allocationWidth, fullAllocationWidth) / 2;
+            svgText(labelLayer, labelCenter, memoryY + 45, session.name, 'svg-label strong');
+            svgText(labelLayer, labelCenter, memoryY + 67, `Used ${Math.min(usedCapacity, allocatedCapacity).toFixed(1)} / ${session.capacity.toFixed(1)} GiB`, 'svg-label tiny');
+          }
+        });
+
+        if (newestUsedEnd > memoryX && progress < .98) {
+          usedGlow.setAttribute('x', newestUsedEnd - 48);
+          usedGlow.setAttribute('width', 50);
+          usedGlow.setAttribute('opacity', .7);
+        }
+
+        const phase = phases.reduce((result, item, index) => progress >= item.at ? index : result, 0);
+        phaseIndex.textContent = `${String(phase + 1).padStart(2, '0')} / 09`;
+        phaseTitle.textContent = phases[phase].title;
+        phaseDesc.textContent = phases[phase].desc;
+        if (phase !== previousPhase && announce) liveStatus.textContent = `Stage ${phase + 1}: ${phases[phase].title}`;
+        previousPhase = phase;
+
+        const seconds = Math.round(progress * 48);
+        clockValue.textContent = `00:${String(seconds).padStart(2, '0')}`;
+        statAllocated.textContent = `${fixedPoolGiB.toFixed(1)} GiB`;
+        statUsed.textContent = `${effectiveUsed.toFixed(1)} / ${fixedPoolGiB.toFixed(1)} GiB`;
+        statUsedNote.textContent = effectiveUsed > 0
+          ? `${Math.round(effectiveUsed / fixedPoolGiB * 100)}% of the fixed pool is used`
+          : 'Waiting for tokens';
+        timeline.value = Math.round(progress * 1000);
+        timeline.style.setProperty('--timeline-fill', `${progress * 100}%`);
+      }
+
+      function frame(now) {
+        const elapsed = now - lastTime;
+        lastTime = now;
+        if (playing && !reduceMotion) {
+          const next = progress + elapsed / duration;
+          if (next >= 1) {
+            render(1, true);
+            setPlaying(false);
+            window.setTimeout(() => {
+              progress = 0;
+              render(0, false);
+              setPlaying(true);
+              lastTime = performance.now();
+            }, 1800);
+          } else {
+            render(next, true);
+          }
+        }
+        requestAnimationFrame(frame);
+      }
+
+      playButton.addEventListener('click', () => {
+        if (progress >= 1) progress = 0;
+        setPlaying(!playing);
+        lastTime = performance.now();
+        render(progress, true);
+      });
+
+      resetButton.addEventListener('click', () => {
+        progress = 0;
+        render(0, true);
+        setPlaying(!reduceMotion);
+        lastTime = performance.now();
+      });
+
+      timeline.addEventListener('input', (event) => {
+        setPlaying(false);
+        render(Number(event.target.value) / 1000, true);
+      });
+
+      if (reduceMotion) {
+        setPlaying(false);
+        render(1, false);
+      } else {
+        render(0, false);
+      }
+      requestAnimationFrame(frame);
+    })();
+  </script>
+</body>
+</html>
